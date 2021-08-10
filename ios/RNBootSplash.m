@@ -1,13 +1,36 @@
 #import "RNBootSplash.h"
+
 #import <React/RCTBridge.h>
-#import <UIKit/UIKit.h>
+#import <React/RCTLog.h>
+#import <React/RCTUtils.h>
 
-static UIView* bootSplashView = nil;
-static bool isFlaggedAsHidden = false;
-
-@implementation RNBootSplash
+static NSMutableArray<RNBootSplashTask *> *_taskQueue = nil;
+static NSString *_storyboardName = @"BootSplash";
+static RCTRootView *_rootView = nil;
+static RNBootSplashStatus _status = RNBootSplashStatusHidden;
+static UIViewController *_splashVC = nil;
 
 static UIWindow *_window = nil;
+
+@implementation RNBootSplashTask
+
+- (instancetype)initWithType:(RNBootSplashTaskType)type
+                        fade:(BOOL)fade
+                    resolver:(RCTPromiseResolveBlock _Nonnull)resolve
+                    rejecter:(RCTPromiseRejectBlock _Nonnull)reject {
+  if (self = [super init]) {
+    _type = type;
+    _fade = fade;
+    _resolve = resolve;
+    _reject = reject;
+  }
+
+  return self;
+}
+
+@end
+
+@implementation RNBootSplash
 
 RCT_EXPORT_MODULE();
 
@@ -19,83 +42,194 @@ RCT_EXPORT_MODULE();
   return dispatch_get_main_queue();
 }
 
-- (instancetype)init {
-  if (self = [super init]) {
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(handleJavaScriptDidFailToLoad:)
-                                                 name:RCTJavaScriptDidFailToLoadNotification
-                                               object:nil];
-  }
-
-  return self;
-}
-
-+ (void)show:(NSString *)name {
-    UIViewController *rootViewController = [UIViewController new];
++ (void)initWithStoryboard:(NSString *)storyboardName {
+    UIViewController *rootVC = RCTPresentedViewController();
 
     _window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     _window.backgroundColor = [UIColor clearColor];
-    _window.rootViewController = rootViewController;
+    _window.rootViewController = rootVC;
 
-    [RNBootSplash show:name inView:rootViewController.view];
+    [RNBootSplash initWithStoryboard:storyboardName rootView:rootVC.view];
 
     [_window makeKeyAndVisible];
 }
 
-+ (void)show:(NSString * _Nonnull)name inView:(RCTRootView * _Nonnull)view {
-  if (bootSplashView != nil) {
-    return NSLog(@"🚨 [RNBootSplash] show method is called more than once");
-  }
++ (void)initWithStoryboard:(NSString * _Nonnull)storyboardName
+                  rootView:(RCTRootView * _Nonnull)rootView {
+  UIViewController *rootVC = RCTPresentedViewController();
 
-  NSArray *resources = [[NSBundle mainBundle] loadNibNamed:name owner:self options:nil];
-  UIView *xib = resources ? [resources firstObject] : nil;
-
-  if (xib != nil) {
-    xib.frame = [view bounds];
-    bootSplashView = xib;
-    [view addSubview:xib];
-  } else {
-    NSLog(@"🚨 [RNBootSplash] File \"%@.xib\" does not exists or is not copied in app bundle resources", name);
-  }
-}
-
-- (void)removeFromView {
-  if (bootSplashView != nil) {
-    [bootSplashView removeFromSuperview];
-    bootSplashView = nil;
-  }
-    [[NSNotificationCenter defaultCenter] removeObserver:self
-                                                  name:RCTJavaScriptDidFailToLoadNotification
-                                                object:nil];
-
-    [RNBootSplash receiveBootSplashNotification];
-}
-
-- (void)handleJavaScriptDidFailToLoad:(NSNotification *)notification {
-  [self removeFromView];
-}
-
-RCT_EXPORT_METHOD(hide:(float)duration) {
-  if (bootSplashView == nil || isFlaggedAsHidden) {
+  if (!rootVC) {
+    RCTLogError(@"react-native-bootsplash has been initialized too early: rootViewController must be set");
     return;
   }
 
-  isFlaggedAsHidden = true;
-  float roundedDuration = lroundf(duration);
+  _rootView = rootView;
+  _status = RNBootSplashStatusVisible;
+  _storyboardName = storyboardName;
+  _taskQueue = [[NSMutableArray alloc] init];
 
-  if (roundedDuration <= 0) {
-    return [self removeFromView];
+  UIStoryboard *storyboard = [UIStoryboard storyboardWithName:_storyboardName bundle:nil];
+  [_rootView setLoadingView:[[storyboard instantiateInitialViewController] view]];
+
+  [[NSNotificationCenter defaultCenter] removeObserver:rootView
+                                                  name:RCTContentDidAppearNotification
+                                                object:rootView];
+
+  _splashVC = [storyboard instantiateInitialViewController];
+  [_splashVC setModalPresentationStyle:UIModalPresentationOverFullScreen];
+  [_splashVC setModalTransitionStyle:UIModalTransitionStyleCrossDissolve];
+
+  [rootVC presentViewController:_splashVC animated:false completion:^{
+    [_rootView.loadingView removeFromSuperview];
+    _rootView.loadingView = nil;
+
+    [self shiftNextTask]; // JS thread might started pushing tasks
+  }];
+
+  [[NSNotificationCenter defaultCenter] addObserver:self
+                                           selector:@selector(onJavaScriptDidLoad:)
+                                               name:RCTJavaScriptDidLoadNotification
+                                             object:nil];
+
+  [[NSNotificationCenter defaultCenter] addObserver:self
+                                           selector:@selector(onJavaScriptDidFailToLoad)
+                                               name:RCTJavaScriptDidFailToLoadNotification
+                                             object:nil];
+
+  [[NSNotificationCenter defaultCenter] addObserver:self
+                                           selector:@selector(shiftNextTask)
+                                               name:UIApplicationDidBecomeActiveNotification
+                                             object:nil];
+}
+
++ (void)onJavaScriptDidLoad:(NSNotification *)notification {
+  [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                  name:RCTJavaScriptDidLoadNotification
+                                                object:nil];
+
+  [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                  name:RCTJavaScriptDidFailToLoadNotification
+                                                object:nil];
+
+  [RNBootSplash receiveBootSplashNotification];
+}
+
++ (void)onJavaScriptDidFailToLoad {
+  if (_splashVC != nil) {
+    [_splashVC dismissViewControllerAnimated:false
+                                  completion:^{
+      _splashVC = nil;
+    }];
   }
 
-  [UIView animateWithDuration:roundedDuration / 1000
-                        delay:0.0
-                      options:UIViewAnimationOptionCurveEaseIn
-                   animations:^{
-                     bootSplashView.alpha = 0;
-                   }
-                   completion:^(BOOL finished) {
-                     [self removeFromView];
-                   }];
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
+  [RNBootSplash receiveBootSplashNotification];
+}
+
++ (void)shiftNextTask {
+  bool shouldSkipTick = _rootView.loadingView != nil
+    || _status == RNBootSplashStatusTransitioningToVisible
+    || _status == RNBootSplashStatusTransitioningToHidden
+    || [_taskQueue count] == 0
+    || [[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground;
+
+  if (shouldSkipTick) return;
+
+  RNBootSplashTask *task = [_taskQueue objectAtIndex:0];
+  [_taskQueue removeObjectAtIndex:0];
+
+  switch (task.type) {
+    case RNBootSplashTaskTypeShow:
+      return [self showWithTask:task];
+    case RNBootSplashTaskTypeHide:
+      return [self hideWithTask:task];
+  }
+}
+
++ (void)showWithTask:(RNBootSplashTask *)task {
+  if (_splashVC != nil) {
+    task.resolve(@(true)); // splash screen is already visible
+    [self shiftNextTask];
+  } else {
+    _status = RNBootSplashStatusTransitioningToVisible;
+
+    _splashVC = [[UIStoryboard storyboardWithName:_storyboardName bundle:nil] instantiateInitialViewController];
+    [_splashVC setModalPresentationStyle:UIModalPresentationOverFullScreen];
+    [_splashVC setModalTransitionStyle:UIModalTransitionStyleCrossDissolve];
+
+    [RCTPresentedViewController() presentViewController:_splashVC
+                                               animated:task.fade
+                                             completion:^{
+      _status = RNBootSplashStatusVisible;
+
+      task.resolve(@(true));
+      [self shiftNextTask];
+    }];
+  }
+}
+
++ (void)hideWithTask:(RNBootSplashTask *)task {
+  if (_splashVC == nil) {
+    task.resolve(@(true)); // splash screen is already hidden
+    [self shiftNextTask];
+  } else {
+    _status = RNBootSplashStatusTransitioningToHidden;
+
+    [_splashVC dismissViewControllerAnimated:task.fade
+                                  completion:^{
+      _splashVC = nil;
+      _status = RNBootSplashStatusHidden;
+
+      task.resolve(@(true));
+      [self shiftNextTask];
+    }];
+  }
+}
+
+RCT_REMAP_METHOD(show,
+                 showWithFade:(BOOL)fade
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  if (_rootView == nil)
+    return reject(@"uninitialized_module", @"react-native-bootsplash has not been initialized", nil);
+
+  RNBootSplashTask *task = [[RNBootSplashTask alloc] initWithType:RNBootSplashTaskTypeShow
+                                                             fade:fade
+                                                         resolver:resolve
+                                                         rejecter:reject];
+
+  [_taskQueue addObject:task];
+  [RNBootSplash shiftNextTask];
+}
+
+RCT_REMAP_METHOD(hide,
+                 hideWithFade:(BOOL)fade
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  if (_rootView == nil)
+    return reject(@"uninitialized_module", @"react-native-bootsplash has not been initialized", nil);
+
+  RNBootSplashTask *task = [[RNBootSplashTask alloc] initWithType:RNBootSplashTaskTypeHide
+                                                             fade:fade
+                                                         resolver:resolve
+                                                         rejecter:reject];
+
+  [_taskQueue addObject:task];
+  [RNBootSplash shiftNextTask];
+}
+
+RCT_REMAP_METHOD(getVisibilityStatus,
+                 getVisibilityStatusWithResolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  switch (_status) {
+    case RNBootSplashStatusVisible:
+      return resolve(@"visible");
+    case RNBootSplashStatusHidden:
+      return resolve(@"hidden");
+    case RNBootSplashStatusTransitioningToVisible:
+    case RNBootSplashStatusTransitioningToHidden:
+      return resolve(@"transitioning");
+  }
 }
 
 + (void) receiveBootSplashNotification

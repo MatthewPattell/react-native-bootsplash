@@ -2,36 +2,36 @@ import React, { useEffect, useRef, useState } from "react";
 import { Animated, Dimensions, StyleSheet, Text, View } from "react-native";
 import BootSplash from "react-native-bootsplash";
 
-let reactLogo = require("./assets/react_logo.png");
-let windowHeight = Dimensions.get("window").height;
+let bootSplashLogo = require("./assets/bootsplash_logo.png");
 
-let fakeApiCallWithoutBadNetwork = ms =>
-  new Promise(resolve => setTimeout(resolve, ms));
+let fakeApiCallWithoutBadNetwork = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 let App = () => {
   let [bootSplashIsVisible, setBootSplashIsVisible] = useState(true);
-  let [reactLogoIsLoaded, setReactLogoIsLoaded] = useState(false);
+  let [bootSplashLogoIsLoaded, setBootSplashLogoIsLoaded] = useState(false);
   let opacity = useRef(new Animated.Value(1));
   let translateY = useRef(new Animated.Value(0));
 
   let init = async () => {
-    BootSplash.hide();
-
     // You can uncomment this line to add a delay on app startup
-    // let data = await fakeApiCallWithoutBadNetwork(3000);
+    // await fakeApiCallWithoutBadNetwork(3000);
 
-    let useNativeDriver = true;
+    await BootSplash.hide();
 
     Animated.stagger(250, [
-      Animated.spring(translateY.current, { useNativeDriver, toValue: -50 }),
       Animated.spring(translateY.current, {
-        useNativeDriver,
-        toValue: windowHeight,
+        useNativeDriver: true,
+        toValue: -50,
+      }),
+      Animated.spring(translateY.current, {
+        useNativeDriver: true,
+        toValue: Dimensions.get("window").height,
       }),
     ]).start();
 
     Animated.timing(opacity.current, {
-      useNativeDriver,
+      useNativeDriver: true,
       toValue: 0,
       duration: 150,
       delay: 350,
@@ -41,8 +41,8 @@ let App = () => {
   };
 
   useEffect(() => {
-    reactLogoIsLoaded && init();
-  }, [reactLogoIsLoaded]);
+    bootSplashLogoIsLoaded && init();
+  }, [bootSplashLogoIsLoaded]);
 
   return (
     <View style={styles.container}>
@@ -57,9 +57,9 @@ let App = () => {
           ]}
         >
           <Animated.Image
-            source={reactLogo}
+            source={bootSplashLogo}
             fadeDuration={0}
-            onLoadEnd={() => setReactLogoIsLoaded(true)}
+            onLoadEnd={() => setBootSplashLogoIsLoaded(true)}
             style={[
               styles.logo,
               { transform: [{ translateY: translateY.current }] },
